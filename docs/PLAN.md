@@ -36,13 +36,25 @@ learning and real use. Portable C11 kernel + thin per-chip ports.
   mutex-ownership delete guard, zombie-state fencing, churn testing.
   4 new test binaries + heap-freedom gate, 16/16 green.
 
-## Phase 4 — AVR port (Uno then Mega)
+## Phase 4 — AVR port (Uno then Mega) — DONE, green
 
-- Uno (ATmega328P) first: timer tick, AVR context-switch assembly,
-  `SREG`/SP handling, USART0 demo output.
-- Mega (ATmega2560) delta: 3-byte program counter, `EIND` handling, large
-  flash linker script. Highest-risk step: prove a task above the 64 KB
-  boundary returns correctly.
+- Uno (ATmega328P): Timer1 CTC 1 kHz tick, AVR context-switch assembly
+  (`port_asm.S`: save/restore, switch, yield, naked tick ISR), `SREG`/SP
+  handling, USART0 polled demo output. simavr transcripts: blinky
+  `ABABAB!END`, selftest `KLHl!END` (preemption proof: a no-yield low task
+  is preempted by a delayed high task — deadlocks without the tick).
+- Mega (ATmega2560) delta: 3-byte program counter (`EIND` craft byte,
+  `EIND`/`RAMPZ` save/restore) — green first try after Uno, same two
+  transcripts. Firmware links below the 64 KB line, so the high byte is 0
+  (see port/avr/README.md for why that still proves the 3-byte path).
+- Bring-up bugs fixed along the way (all documented in port/avr/README.md):
+  return-address byte order (PCh low, PCl high), empty-descending SP
+  (craft points one below the frame), tick-in-scheduler `in_task` flag.
+- Also fixed a kernel portability bug the selftest caught: heap payloads
+  misaligned on AVR (header sizeof 10, not an 8-multiple) — header stride
+  + host alignment regression test. Host suite still 16/16.
+- Budgets: Uno blinky 4.4 KB flash / 1.3 KB SRAM; Uno selftest 11.1 KB /
+  1.8 KB (88.5% SRAM); Mega selftest 11.3 KB / 3.2 KB.
 
 ## Phase 5 — STM32 port (one variant)
 

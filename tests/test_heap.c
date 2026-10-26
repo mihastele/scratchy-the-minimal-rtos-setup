@@ -101,8 +101,15 @@ int main(void)
         uint8_t foreign[32];
         CHECK(mrt_heap_release(h, foreign) == MRT_ERR_INVAL);
     }
+    /* Alignment contract: every payload starts at an 8-multiple offset
+     * from the arena base, on EVERY platform. Bare sizeof(header) is 16
+     * on 64-bit hosts (a multiple — invisible) but 10 on AVR / 12 on
+     * 32-bit ARM, where the old code served misaligned payloads that
+     * release() then rejected (Uno selftest fail 9). A 32-bit host build
+     * fails this test without the header-stride fix. */
     void *d = mrt_heap_alloc(h, 32u);
     CHECK(d != NULL);
+    CHECK((((uintptr_t)d - (uintptr_t)s_mem) % 8u) == 0u);
     CHECK(mrt_heap_release(h, d) == MRT_OK);
     CHECK(mrt_heap_release(h, d) == MRT_ERR_INVAL); /* double release */
     CHECK(mrt_heap_release(h, (uint8_t *)d + 1) == MRT_ERR_INVAL);

@@ -32,6 +32,7 @@
 #include <ucontext.h>
 
 #include "mini_rtos/config.h"
+#include "mini_rtos/kernel.h"
 #include "mini_rtos/port_api.h"
 #include "mini_rtos/task.h"
 
@@ -243,6 +244,15 @@ void mrt_port_idle(void)
     /* The simulator has no power modes: idling is a no-op. Deliberately
      * silent — idle observation belongs to the application idle hook, and a
      * print here would spam every all-delayed test. MCU ports sleep here. */
+}
+
+void mrt_port_end_of_pass(void)
+{
+    /* One virtual timer interrupt per pass, standing in for the hardware
+     * timer ISR. The host ignores the "woke" flag (it is about to pick
+     * anyway); hardware ports leave this empty and use the flag in the
+     * real ISR to decide on rescheduling. */
+    (void)mrt_kernel_on_tick_isr();
 }
 
 bool mrt_port_in_isr(void)

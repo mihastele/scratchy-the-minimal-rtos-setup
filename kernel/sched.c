@@ -105,25 +105,16 @@ static struct mrt_tcb *pick_next(void)
  */
 static void step(void)
 {
-    struct mrt_tcb *next = pick_next();
-    if (next == NULL) {
-        /* Nothing READY: run the kernel idle task instead of special-casing
-         * an "empty" pass. The cursor is untouched, so rotation among real
-         * tasks resumes exactly where it paused. */
-        next = &s_idle_tcb;
-    }
-
-    s_current = next;
-    mrt_port_switch_to(next);
+    /* Pick through the shared helper, switch, then close the pass. The
+     * pass-closing tick is a port call: the host advances virtual time
+     * here, while hardware ports no-op (their timer fires for real). */
+    mrt_priv_pick_and_set_current();
+    mrt_port_switch_to(mrt_priv_current());
     /* The task is back: it yielded (still READY), delayed (DELAYED with a
      * wake tick), suspended itself, or finished (SUSPENDED by the port
      * trampoline). */
     s_current = NULL; /* Between switches nobody runs — say so explicitly. */
-
-    /* One virtual timer interrupt per pass. The host ignores the "woke"
-     * flag (it is about to pick anyway); hardware ports use it to decide
-     * whether the ISR must force a reschedule. */
-    (void)mrt_kernel_on_tick_isr();
+    mrt_port_end_of_pass();
 }
 
 /* --- Public lifecycle (see kernel.h) --- */
@@ -240,6 +231,16 @@ bool mrt_priv_is_inited(void)
 struct mrt_tcb *mrt_priv_current(void)
 {
     return s_current;
+}
+
+void mrt_priv_pick_and_set_current(void)
+{
+    s_current = pick_next();
+    if (s_current == NULL) {
+        /* Nothing READY: the kernel idle task. The cursor is untouched, so
+         * rotation among real tasks resumes exactly where it paused. */
+        s_current = &s_idle_tcb;
+    }
 }
 
 mrt_tick_t mrt_priv_tick_now(void)

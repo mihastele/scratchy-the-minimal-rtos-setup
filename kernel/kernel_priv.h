@@ -9,7 +9,9 @@
  *        shared by accident, this header lists the exact private accessors —
  *        a miniature version of the kernel/port split. Tests and
  *        applications must never include this file; tests get their own
- *        narrow hooks in tests/test_hooks.h.
+ *        narrow hooks in tests/test_hooks.h. PORTS may include it —
+ *        preemptive tick ISRs need the current-task and pick helpers, and
+ *        there is nowhere else honest to get them.
  *
  * THE WAITER PROTOCOL (how blocking works — read this before touching IPC):
  *
@@ -75,6 +77,13 @@ bool mrt_priv_is_inited(void);
 
 /* Currently running task, or NULL while the scheduler itself runs. */
 struct mrt_tcb *mrt_priv_current(void);
+
+/*
+ * Pick the next task and make it current (falling back to the idle task).
+ * Shared by the scheduler loop AND preemptive tick ISRs so host and
+ * hardware always agree on who runs next.
+ */
+void mrt_priv_pick_and_set_current(void);
 
 /* Current tick count (same value mrt_task_get_tick() reports). */
 mrt_tick_t mrt_priv_tick_now(void);

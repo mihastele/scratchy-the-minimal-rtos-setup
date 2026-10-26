@@ -2,6 +2,10 @@
 build*/
 cmake-build-*/
 
+# Machine-local toolchain extracts (avr-gcc RPMs, simavr source): see
+# docs/TOOLCHAINS.md for the recipes. Never commit these.
+.toolchains/
+
 # Compiled objects and firmware images.
 *.o
 *.a

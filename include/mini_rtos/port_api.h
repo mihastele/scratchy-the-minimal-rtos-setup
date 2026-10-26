@@ -72,6 +72,14 @@ void mrt_port_exit_critical(void);
 void mrt_port_idle(void);
 
 /*
+ * End-of-pass hook, called by the scheduler loop after every task switch
+ * returns. The host advances its virtual timer here (one tick per pass);
+ * hardware ports implement it as an empty function because their timer
+ * interrupt drives time for real. Never called from tasks or ISRs.
+ */
+void mrt_port_end_of_pass(void);
+
+/*
  * Free a reaped task's port resources (the mirror of mrt_port_task_init).
  * Called exactly once per successful task_init, from the reap path — never
  * for the running task, so freeing its stack/context is always safe. After

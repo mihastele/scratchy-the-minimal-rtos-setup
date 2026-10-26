@@ -55,4 +55,14 @@
  */
 #define MRT_IDLE_SLOT MRT_MAX_TASKS
 
+/*
+ * AVR task stack pool entry, in bytes. Every task (plus idle) reserves one
+ * of these from SRAM, so budget (MRT_MAX_TASKS + 1) * SIZE against the
+ * chip: Uno builds override to 4 tasks x 192 bytes; Mega fits 8 x 256.
+ * Size with the watermark (mrt_task_stack_unused), not superstition.
+ */
+#ifndef MRT_AVR_TASK_STACK_SIZE
+#define MRT_AVR_TASK_STACK_SIZE 256u
+#endif
+
 #endif /* MINI_RTOS_CONFIG_H */

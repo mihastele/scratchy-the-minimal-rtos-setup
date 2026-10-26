@@ -91,6 +91,28 @@ context. This teaches the real shape — save current state, restore next
 state — while staying in plain C. `ucontext` is host-only and never ships
 on a microcontroller.
 
+## The AVR port (Phase 4)
+
+Same contract, no fakery: Timer1 in CTC mode is the 1 kHz tick, and
+`port_asm.S` + `port.c` implement the real thing on ATmega328P (Uno) and
+ATmega2560 (Mega) from one source pair:
+
+- Context switch = save all registers + SREG to the live stack, stash SP,
+  load the next SP, restore, `ret`. First-run tasks get a crafted stack
+  whose `ret` lands in a trampoline that calls the task body.
+- The tick ISR is a naked handler: save, stash SP, run one C helper (tick
+  + wake + maybe switch), reload SP, restore, `reti`. The helper only
+  switches stacks when the tick landed mid-task — an `in_task` flag the
+  asm maintains tells scheduler-stack from task-stack apart, because the
+  current-task pointer alone is set in both cases.
+- Mega delta: 3-byte return addresses (pushed EIND byte) plus `EIND`/`RAMPZ`
+  in the save/restore set. Firmware links below 64 KB, so the high byte is
+  0 — see `port/avr/README.md` for the full story and the three bring-up
+  bugs (return-address byte order, empty-descending SP, the `in_task` flag).
+- Proven with no hardware: `tools/avr_sim_check.sh uno|mega` rebuilds both
+  example firmwares and demands exact UART transcripts under simavr
+  (`ABABAB!END`, `KLHl!END` — the latter deadlocks without preemption).
+
 ## Memory discipline (Phase 3)
 
 - All kernel objects are statically allocated by the caller (`..._create_static`).

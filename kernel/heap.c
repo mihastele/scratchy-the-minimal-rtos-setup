@@ -39,9 +39,18 @@ typedef struct mrt_heap_blk {
     uint32_t magic;           /* IDLE or USED stamp. */
 } heap_blk_t;
 
+/* Header STRIDE (not bare sizeof): every payload starts one stride past
+ * its header, so the stride must be an alignment multiple or payloads land
+ * misaligned and release's alignment check rejects them. Bare sizeof is 16
+ * on 64-bit hosts (fine) but 10 on AVR and 12 on 32-bit ARM (broken — the
+ * Uno selftest caught this as heap fail 9). */
+#define MRT_HEAP_HDR_STRIDE \
+    (uint32_t)(((uint32_t)sizeof(heap_blk_t) + MRT_HEAP_ALIGN - 1u) & \
+               (uint32_t) ~(MRT_HEAP_ALIGN - 1u))
+
 /* Smallest remainder worth splitting off: must fit its own header plus a
  * minimum payload, or the split manufactures unusable slivers. */
-#define MRT_HEAP_MIN_BLOCK (uint32_t)(sizeof(heap_blk_t) + MRT_HEAP_ALIGN)
+#define MRT_HEAP_MIN_BLOCK (uint32_t)(MRT_HEAP_HDR_STRIDE + MRT_HEAP_ALIGN)
 
 static uint32_t align_up(uint32_t n)
 {
@@ -86,7 +95,7 @@ void *mrt_heap_alloc(mrt_heap_handle_t h, uint32_t bytes)
     if (h == NULL || bytes == 0u) {
         return NULL;
     }
-    uint32_t need = align_up(bytes) + (uint32_t)sizeof(heap_blk_t);
+    uint32_t need = align_up(bytes) + MRT_HEAP_HDR_STRIDE;
 
     mrt_port_enter_critical();
     heap_blk_t *prev = NULL;
@@ -122,7 +131,7 @@ void *mrt_heap_alloc(mrt_heap_handle_t h, uint32_t bytes)
     }
     cur->magic = MRT_HEAP_MAGIC_USED;
     mrt_port_exit_critical();
-    return (void *)(cur + 1);
+    return (void *)((uint8_t *)cur + MRT_HEAP_HDR_STRIDE);
 }
 
 mrt_err_t mrt_heap_release(mrt_heap_handle_t h, void *ptr)
@@ -137,11 +146,12 @@ mrt_err_t mrt_heap_release(mrt_heap_handle_t h, void *ptr)
     uintptr_t addr = (uintptr_t)ptr;
     /* Payload must sit strictly inside the arena (past the first header)
      * and stay aligned — else it never came from here. */
-    if (addr < base + sizeof(heap_blk_t) || addr >= base + h->total ||
+    if (addr < base + MRT_HEAP_HDR_STRIDE || addr >= base + h->total ||
         ((addr - base) % MRT_HEAP_ALIGN) != 0u) {
         return MRT_ERR_INVAL;
     }
-    heap_blk_t *blk = (heap_blk_t *)((uint8_t *)ptr - sizeof(heap_blk_t));
+    heap_blk_t *blk =
+        (heap_blk_t *)((uint8_t *)ptr - MRT_HEAP_HDR_STRIDE);
     if (blk->magic != MRT_HEAP_MAGIC_USED) {
         /* Double release (IDLE stamp) or a forged header — either way, no. */
         return MRT_ERR_INVAL;
@@ -185,7 +195,7 @@ mrt_err_t mrt_heap_free_bytes(mrt_heap_handle_t h, uint32_t *out_bytes)
      * in total — still an upper bound per call when split across blocks. */
     uint32_t sum = 0u;
     for (heap_blk_t *cur = h->free_head; cur != NULL; cur = cur->next) {
-        sum += cur->size - (uint32_t)sizeof(heap_blk_t);
+        sum += cur->size - MRT_HEAP_HDR_STRIDE;
     }
     mrt_port_exit_critical();
     *out_bytes = sum;
