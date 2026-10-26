@@ -4,11 +4,12 @@ A free (MIT licensed), production-minded real-time OS written for learning.
 Every file explains what it does and why, so you can read the source top to
 bottom like a textbook — and still ship it on a real board.
 
-## Status: Phase 1 (kernel core runs on host)
+## Status: Phase 3 (memory + lifecycle run on host)
 
 - Host simulator builds and runs demo tasks: yes.
-- Kernel core: priorities, round-robin, delays, delay_until, suspend/resume,
-  idle task + hook, tick-ISR time model — done on host, 6/6 tests green.
+- Kernel core + IPC + memory: everything in Phase 2, plus task delete with
+  reaping, fixed-block pools, fenced-off app heap, stack watermarks, and a
+  build gate proving the kernel never touches libc heap — 16/16 checks green.
 - Preemptive hardware ports: AVR in Phase 4, STM32 in Phase 5.
 - Arduino Uno (ATmega328P) / Mega (ATmega2560): planned, Phase 4.
 - One STM32 (default assumption STM32F103C8, to confirm): planned, Phase 5.

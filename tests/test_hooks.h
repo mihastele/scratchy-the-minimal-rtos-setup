@@ -20,4 +20,12 @@ void mrt_test_reset(void);
 /* Set the tick counter to an arbitrary value (wraparound tests). */
 void mrt_test_set_tick(mrt_tick_t t);
 
+/*
+ * Fake ISR context for discipline tests: between enter and exit,
+ * mrt_port_in_isr() reads true, so blocking calls must refuse with
+ * MRT_ERR_ISR. Nests like real interrupts (enter twice needs two exits).
+ */
+void mrt_test_isr_enter(void);
+void mrt_test_isr_exit(void);
+
 #endif /* MINI_RTOS_TEST_HOOKS_H */

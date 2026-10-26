@@ -41,4 +41,12 @@ typedef uint32_t mrt_tick_t;
 /* Task priority: 0 (lowest/idle) .. MRT_MAX_PRIORITY. Fits a uint8_t on AVR. */
 typedef uint8_t mrt_prio_t;
 
+/*
+ * "Block until it happens, no matter how long": pass as the timeout to any
+ * blocking IPC call. A FOREVER wait still ends early if the task is
+ * suspended (the call then returns MRT_ERR_STATE) — nothing waits past a
+ * suspend. Never used with plain delays, which always have a deadline.
+ */
+#define MRT_WAIT_FOREVER UINT32_MAX
+
 #endif /* MINI_RTOS_TYPES_H */

@@ -49,6 +49,9 @@ static void idle_task_body(void *arg)
 {
     (void)arg;
     for (;;) {
+        /* Janitor first: collect self-deleted tasks so their slots (and
+         * port resources) return to circulation on the very next pass. */
+        mrt_priv_reap_deleted();
         if (s_idle_hook != NULL) {
             s_idle_hook();
         }
@@ -213,6 +216,14 @@ bool mrt_kernel_on_tick_isr(void)
         if (t->state == MRT_TASK_DELAYED &&
             mrt_time_after_eq(s_tick, t->wake_tick)) {
             t->state = MRT_TASK_READY;
+            if (t->wait_obj != NULL) {
+                /* An IPC waiter whose deadline passed: report TIMEOUT and
+                 * detach, so a later post cannot "wake" an already-running
+                 * task and corrupt its next wait. */
+                t->wait_result = MRT_ERR_TIMEOUT;
+                t->wait_obj = NULL;
+                t->wait_kind = MRT_WAIT_NONE;
+            }
             woke = true;
         }
     }

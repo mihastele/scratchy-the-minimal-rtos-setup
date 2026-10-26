@@ -20,16 +20,21 @@ learning and real use. Portable C11 kernel + thin per-chip ports.
   pass, same function hardware ISRs will call. Task delete arrives with the
   memory work in Phase 3.
 
-## Phase 2 — IPC and sync on host
+## Phase 2 — IPC and sync on host (done)
 
-- Queues, binary/counting semaphores, mutexes, event flags.
-- Blocking with timeout, non-blocking, and ISR-safe variants; documented
-  priority-inversion story.
+- Queues, counting/binary semaphores, mutexes, event flags — all with
+  blocking + timeout, non-blocking, and ISR-safe variants.
+- Shared waiter protocol (priority + FIFO), hint-vs-handoff wake discipline,
+  enforced ISR refusal, single-level priority inheritance with a documented
+  nesting caveat. 5 new tests, 11/11 green.
 
-## Phase 3 — Memory and objects
+## Phase 3 — Memory and objects (done)
 
-- `CreateStatic` everywhere, fixed-block pools, optional tiny heap kept out
-  of kernel paths, stack high-water marks, OOM/error-path tests.
+- `CreateStatic` everywhere, fixed-block pools, optional tiny heap fenced
+  off from kernel paths by a CTest gate, stack high-water marks.
+- Task delete with reaping (sync for others, idle-deferred for self),
+  mutex-ownership delete guard, zombie-state fencing, churn testing.
+  4 new test binaries + heap-freedom gate, 16/16 green.
 
 ## Phase 4 — AVR port (Uno then Mega)
 

@@ -26,8 +26,13 @@ typedef void (*mrt_task_func_t)(void *arg);
 /* Lifecycle states. A task is always in exactly one of these. */
 typedef enum mrt_task_state {
     MRT_TASK_READY,    /* May run; the scheduler picks among READY tasks. */
-    MRT_TASK_DELAYED,  /* Sleeping until wake_tick; see mrt_task_delay_ticks. */
-    MRT_TASK_SUSPENDED /* Parked: finished, or explicitly suspended. */
+    MRT_TASK_DELAYED,  /* Sleeping until wake_tick (plain delay or IPC wait
+                           with a timeout — see wait_obj below). */
+    MRT_TASK_BLOCKED,  /* Waiting on an IPC object with MRT_WAIT_FOREVER:
+                           only the object (or a suspend) can wake it. */
+    MRT_TASK_SUSPENDED, /* Parked: finished, or explicitly suspended. */
+    MRT_TASK_DELETED   /* Dead but not yet reaped (self-delete only): never
+                          picked, freed by the idle task. No API acts on it. */
 } mrt_task_state_t;
 
 /*
@@ -43,11 +48,25 @@ typedef struct mrt_tcb {
     char name[MRT_MAX_TASK_NAME_LEN]; /* Human label, NUL-terminated. */
     mrt_task_func_t func;             /* The task body. */
     void *arg;                        /* Passed to func. */
-    mrt_prio_t prio;                  /* 0..MRT_MAX_PRIORITY, higher wins. */
+    /* Effective priority: max(base_prio, boost_prio). The scheduler reads
+     * only this field, so inheritance works without touching the picker. */
+    mrt_prio_t prio;
+    mrt_prio_t base_prio;            /* Owned priority (create/set_priority). */
+    mrt_prio_t boost_prio;            /* Inheritance boost, 0 when none. */
+    uint8_t owned_mutexes;            /* Mutexes held (delete guard). */
     volatile mrt_task_state_t state;  /* volatile: ISRs change it on MCU. */
     mrt_tick_t wake_tick;             /* Valid only while DELAYED. */
     void *port_state;                 /* Opaque machine state, port-owned. */
     uint8_t slot;                     /* Index in the kernel task table. */
+    /* --- IPC wait fields (see kernel/wait.c for the protocol) --- */
+    void *wait_obj;                   /* Object blocked on, NULL if none. */
+    uint8_t wait_kind;                /* MRT_WAIT_* flavor (kernel_priv.h). */
+    mrt_err_t wait_result;            /* Wake report: OK, TIMEOUT, or STATE
+                                         (suspended mid-wait: wait dead). */
+    uint32_t wait_seq;                /* FIFO order among equal-prio waiters. */
+    uint32_t wait_bits;               /* Event wait mask (MRT_WAIT_EVENT). */
+    uint32_t wait_aux;                /* Event observed-bits snapshot. */
+    uint8_t wait_opts;                /* Event options (MRT_EVENT_*). */
 } mrt_tcb_t;
 
 /* Opaque handle: a pointer in disguise, so the type can evolve. */
@@ -95,9 +114,12 @@ mrt_tick_t mrt_task_get_tick(void);
  * Suspend a task: it stops being scheduled until mrt_task_resume().
  * Pass NULL to suspend the calling task itself (valid only inside a task).
  *
- * Suspending abandons any in-progress delay — a DELAYED task becomes
- * SUSPENDED with its wake tick forgotten, and resume() makes it READY
- * immediately. Suspending an already-SUSPENDED task is a harmless no-op.
+ * Suspending abandons any in-progress delay or IPC wait — a DELAYED or
+ * BLOCKED task becomes SUSPENDED with its wake tick / wait forgotten. When
+ * it is resumed, the abandoned blocking call returns MRT_ERR_STATE instead
+ * of silently re-blocking. Suspending an already-SUSPENDED task is a
+ * harmless no-op. Suspending a mutex owner does NOT release the mutex (the
+ * owner still owns it when resumed) — coordinate before parking owners.
  *
  * Returns MRT_OK, MRT_ERR_INVAL (rogue handle — not a created task), or
  * MRT_ERR_STATE (NULL with no current task).
@@ -108,10 +130,30 @@ mrt_err_t mrt_task_suspend(mrt_task_handle_t task);
  * Make a SUSPENDED task READY again. The handle must be explicit (NULL is
  * MRT_ERR_INVAL — "resume myself" is meaningless since a running task is
  * never suspended). Resuming a READY task is a harmless no-op; resuming a
- * DELAYED task is MRT_ERR_STATE (delays must run their course — suspend
- * first if you truly mean to cancel one).
+ * DELAYED or BLOCKED task is MRT_ERR_STATE (delays and waits must run
+ * their course — suspend first if you truly mean to cancel one).
  */
 mrt_err_t mrt_task_resume(mrt_task_handle_t task);
+
+/*
+ * Delete a task, freeing its slot (and port resources) for reuse. Pass NULL
+ * to delete the calling task itself.
+ *
+ * Two paths, one rule — never free a running stack:
+ * - Deleting ANOTHER task reaps it synchronously: its wait is detached,
+ *   its port state freed, and the table compacted, all before returning.
+ * - Deleting YOURSELF only marks the task DELETED and yields; the idle
+ *   task reaps it on its next pass. Code after delete(NULL) NEVER runs —
+ *   structure self-deleting tasks as "cleanup, delete, (no return)".
+ *
+ * Guards: a task holding any mutex cannot be deleted (STATE — unlock
+ * first, so no mutex is ever orphaned); rogue handles are INVAL; NULL with
+ * no current task is STATE. The idle task has no handle and cannot die.
+ * A deleted task's TCB storage belongs to the application and may back a
+ * future create once reaping completed (immediately for others, after an
+ * idle pass for self).
+ */
+mrt_err_t mrt_task_delete(mrt_task_handle_t task);
 
 /*
  * Change a task's priority; takes effect at the next scheduling decision.
@@ -121,7 +163,7 @@ mrt_err_t mrt_task_resume(mrt_task_handle_t task);
  * preemptive ports (Phase 4/5) reschedule immediately instead.
  *
  * Returns MRT_OK, MRT_ERR_INVAL (rogue handle or prio > MRT_MAX_PRIORITY),
- * or MRT_ERR_STATE (NULL with no current task).
+ * or MRT_ERR_STATE (NULL with no current task, or task already deleted).
  */
 mrt_err_t mrt_task_set_priority(mrt_task_handle_t task, mrt_prio_t prio);
 
@@ -148,5 +190,18 @@ mrt_prio_t mrt_task_get_priority(mrt_task_handle_t task);
  * period == 0 is defined as a yield (same convention as delay_ticks(0)).
  */
 void mrt_task_delay_until(mrt_tick_t *prev_wake, mrt_tick_t period);
+
+/*
+ * Stack high-water mark: bytes of the task's stack never touched since
+ * creation. Ports paint stacks with a pattern at task_init and count the
+ * survivors. Use it to size stacks with evidence instead of guesses: run
+ * the worst case, read the mark, keep a margin (25-50%), shrink.
+ *
+ * Pass NULL for the calling task (valid only inside a task). Measuring
+ * yourself reads slightly pessimistic — the query's own call frame counts
+ * as used. Rogue handles are INVAL, NULL out is INVAL, NULL with no
+ * current task is STATE.
+ */
+mrt_err_t mrt_task_stack_unused(mrt_task_handle_t task, uint32_t *out_bytes);
 
 #endif /* MINI_RTOS_TASK_H */

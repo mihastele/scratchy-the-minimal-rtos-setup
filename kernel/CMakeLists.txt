@@ -1,5 +1,6 @@
 # Portable kernel library: no hardware, no heap, no surprises.
-add_library(mini_rtos_kernel STATIC task.c sched.c)
+add_library(mini_rtos_kernel STATIC
+  task.c sched.c wait.c queue.c sem.c mutex.c event.c pool.c heap.c)
 target_include_directories(mini_rtos_kernel
   PUBLIC ${PROJECT_SOURCE_DIR}/include  # Public API: mini_rtos/*.h
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})  # kernel_priv.h stays private

@@ -37,6 +37,11 @@ _Static_assert(MRT_MAX_TASKS <= 255u, "MRT_MAX_TASKS must fit in uint8_t");
 static struct mrt_tcb *s_table[MRT_MAX_TASKS];
 static uint8_t s_count;
 
+/* True while any entry is MRT_TASK_DELETED: lets the idle reaper skip its
+ * scan on the (usual) nothing-died passes. Set under critical, cleared by
+ * the reaper itself. */
+static bool s_zombies;
+
 /*
  * True when the handle names a live table entry. O(n) with n <= 8: far
  * cheaper than debugging a wild-pointer TCB write. The idle task is NOT in
@@ -120,6 +125,7 @@ mrt_err_t mrt_task_create_static(const char *name,
     tcb_storage->func = func;
     tcb_storage->arg = arg;
     tcb_storage->prio = prio;
+    tcb_storage->base_prio = prio; /* boost starts 0 (memset above). */
     tcb_storage->state = MRT_TASK_READY;
     tcb_storage->slot = s_count;
 
@@ -213,11 +219,23 @@ mrt_err_t mrt_task_suspend(mrt_task_handle_t task)
          * kernel-owned and suspending it would leave nothing to run. */
         return self ? MRT_ERR_STATE : MRT_ERR_INVAL;
     }
+    if (t->state == MRT_TASK_DELETED) {
+        /* Already dying: idempotent OK. Never "resurrect" into SUSPENDED —
+         * the idle reaper only collects DELETED, and anything else leaks. */
+        return MRT_OK;
+    }
 
     mrt_port_enter_critical();
-    /* Unconditional write: READY and DELAYED both become SUSPENDED, so a
-     * delay in progress is abandoned (documented in task.h). */
+    /* Unconditional write: READY, DELAYED, and BLOCKED all become SUSPENDED,
+     * so a delay or IPC wait in progress is abandoned (see task.h). A live
+     * wait is detached with report STATE, so the resumed task's blocking
+     * call returns STATE instead of looping back into the wait. */
     t->state = MRT_TASK_SUSPENDED;
+    if (t->wait_obj != NULL) {
+        t->wait_obj = NULL;
+        t->wait_kind = MRT_WAIT_NONE;
+        t->wait_result = MRT_ERR_STATE;
+    }
     mrt_port_exit_critical();
 
     if (t == mrt_priv_current()) {
@@ -242,12 +260,18 @@ mrt_err_t mrt_task_resume(mrt_task_handle_t task)
 
     mrt_port_enter_critical();
     mrt_err_t err = MRT_OK;
-    if (task->state == MRT_TASK_SUSPENDED) {
+    switch (task->state) {
+    case MRT_TASK_SUSPENDED:
         task->state = MRT_TASK_READY;
-    } else if (task->state == MRT_TASK_DELAYED) {
-        err = MRT_ERR_STATE; /* Delays run their course — see task.h. */
+        break;
+    case MRT_TASK_READY:
+        break; /* Already eligible; idempotent OK. */
+    default:
+        /* DELAYED, BLOCKED: waits run their course. DELETED: the dead
+         * stay dead — resume must never resurrect a task pending reap. */
+        err = MRT_ERR_STATE;
+        break;
     }
-    /* READY: already eligible; idempotent OK. */
     mrt_port_exit_critical();
     return err;
 }
@@ -266,12 +290,18 @@ mrt_err_t mrt_task_set_priority(mrt_task_handle_t task, mrt_prio_t prio)
     if (!handle_valid(t)) {
         return self ? MRT_ERR_STATE : MRT_ERR_INVAL;
     }
+    if (t->state == MRT_TASK_DELETED) {
+        return MRT_ERR_STATE; /* Gone is gone: no tuning the dead. */
+    }
 
-    /* One byte-sized write under critical: the next pick observes it. No
-     * immediate reschedule on the host (cooperative — see task.h); the
-     * preemptive ports yield here when the new priority warrants it. */
+    /* Write base, recompute effective: a boosted owner keeps its boost
+     * (the mutex still needs it); setting below the boost takes full effect
+     * when the mutex is released. No immediate reschedule on the host
+     * (cooperative — see task.h); preemptive ports yield here when the new
+     * priority warrants it. */
     mrt_port_enter_critical();
-    t->prio = prio;
+    t->base_prio = prio;
+    t->prio = (prio > t->boost_prio) ? prio : t->boost_prio;
     mrt_port_exit_critical();
     return MRT_OK;
 }
@@ -283,6 +313,89 @@ mrt_prio_t mrt_task_get_priority(mrt_task_handle_t task)
      * Release builds trust the caller — validate handles beforehand. */
     MRT_ASSERT(t != NULL && handle_valid(t));
     return t->prio;
+}
+
+/*
+ * Cut `t` out of the table: free its port resources, then compact by moving
+ * the last entry into the hole (updating its slot — the slot==index
+ * invariant is what keeps the port and the cursor honest). Caller holds
+ * critical. The victim must NOT be running: only the reap paths call this.
+ */
+static void reap_locked(struct mrt_tcb *t)
+{
+    MRT_ASSERT(t->slot < s_count && s_table[t->slot] == t);
+    mrt_port_task_delete(t);
+    uint8_t last = (uint8_t)(s_count - 1u);
+    if (t->slot != last) {
+        s_table[t->slot] = s_table[last];
+        s_table[t->slot]->slot = t->slot;
+    }
+    s_table[last] = NULL; /* Hygiene: no dangling table pointers. */
+    s_count = last;
+}
+
+mrt_err_t mrt_task_delete(mrt_task_handle_t task)
+{
+    bool self = (task == NULL);
+    struct mrt_tcb *t = self ? mrt_priv_current() : task;
+    /* No assert: the STATE return is the contract (see mrt_task_suspend). */
+    if (t == NULL) {
+        return MRT_ERR_STATE;
+    }
+    if (!handle_valid(t)) {
+        return self ? MRT_ERR_STATE : MRT_ERR_INVAL;
+    }
+    if (t->state == MRT_TASK_DELETED) {
+        return MRT_OK; /* Already dying; the reaper has it. */
+    }
+    /* Never orphan a mutex: an owner pointer into a reused slot would hand
+     * ownership to whatever task comes next. Unlock first, then die. */
+    if (t->owned_mutexes > 0u) {
+        return MRT_ERR_STATE;
+    }
+
+    mrt_port_enter_critical();
+    /* Detach any live wait (a blocked task dies unblocked): waiter scans
+     * skip detached entries, so boosts and broadcasts self-heal. */
+    if (t->wait_obj != NULL) {
+        t->wait_obj = NULL;
+        t->wait_kind = MRT_WAIT_NONE;
+    }
+    if (!self) {
+        /* Someone else's task is never running: reap synchronously. */
+        reap_locked(t);
+        mrt_port_exit_critical();
+        return MRT_OK;
+    }
+    /* Ourselves: mark and yield — the idle task reaps on its next pass,
+     * once we are safely off our own stack. */
+    t->state = MRT_TASK_DELETED;
+    s_zombies = true;
+    mrt_port_exit_critical();
+    mrt_task_yield();
+    /* Unreachable: DELETED tasks are never picked again. If a kernel bug
+     * ever resumes us, park instead of running dead code. */
+    for (;;) {
+        mrt_port_yield_to_sched();
+    }
+    return MRT_OK; /* Placates return-type analysis; never runs. */
+}
+
+mrt_err_t mrt_task_stack_unused(mrt_task_handle_t task, uint32_t *out_bytes)
+{
+    if (out_bytes == NULL) {
+        return MRT_ERR_INVAL;
+    }
+    bool self = (task == NULL);
+    struct mrt_tcb *t = self ? mrt_priv_current() : task;
+    if (t == NULL) {
+        return MRT_ERR_STATE;
+    }
+    if (!handle_valid(t)) {
+        return self ? MRT_ERR_STATE : MRT_ERR_INVAL;
+    }
+    *out_bytes = mrt_port_stack_unused(t);
+    return MRT_OK;
 }
 
 /* --- Private accessors for sched.c (see kernel_priv.h) --- */
@@ -300,7 +413,32 @@ struct mrt_tcb *mrt_priv_task_at(uint8_t slot)
 
 void mrt_priv_task_reset_table(void)
 {
-    /* Test hook: drops every task. The TCB structs belong to the caller, so
-     * there is nothing to free — forgetting the pointers IS the cleanup. */
-    s_count = 0;
+    /* Test hook: drops every task. Port states ARE freed (else the host's
+     * context pool would leak across cases); the TCB structs belong to the
+     * caller, so forgetting the pointers is their cleanup. */
+    for (uint8_t i = 0u; i < s_count; i++) {
+        mrt_port_task_delete(s_table[i]);
+        s_table[i] = NULL;
+    }
+    s_count = 0u;
+    s_zombies = false;
+}
+
+void mrt_priv_reap_deleted(void)
+{
+    if (!s_zombies) {
+        return; /* The common case: nothing died, no scan. */
+    }
+    mrt_port_enter_critical();
+    /* Rescan-friendly loop: each reap compacts a new entry into index i,
+     * so i only advances past survivors. */
+    for (uint8_t i = 0u; i < s_count;) {
+        if (s_table[i]->state == MRT_TASK_DELETED) {
+            reap_locked(s_table[i]);
+        } else {
+            i++;
+        }
+    }
+    s_zombies = false;
+    mrt_port_exit_critical();
 }

@@ -14,6 +14,8 @@
 #ifndef MINI_RTOS_PORT_API_H
 #define MINI_RTOS_PORT_API_H
 
+#include <stdbool.h>
+
 #include "mini_rtos/types.h"
 
 /* Forward declaration only — the full struct lives in task.h. The port
@@ -68,6 +70,31 @@ void mrt_port_exit_critical(void);
  * Must return promptly when an interrupt arrives and must never block.
  */
 void mrt_port_idle(void);
+
+/*
+ * Free a reaped task's port resources (the mirror of mrt_port_task_init).
+ * Called exactly once per successful task_init, from the reap path — never
+ * for the running task, so freeing its stack/context is always safe. After
+ * this returns, the TCB's port_state must be treated as garbage.
+ */
+void mrt_port_task_delete(struct mrt_tcb *tcb);
+
+/*
+ * Stack high-water query: bytes of `tcb`'s stack still holding the
+ * creation-time paint pattern (see mrt_task_stack_unused for the user
+ * story). Ports that cannot track stacks return 0 — honestly, not guessed.
+ * NULL asserts in debug builds and reads 0 in release.
+ */
+uint32_t mrt_port_stack_unused(const struct mrt_tcb *tcb);
+
+/*
+ * True while the calling context is an ISR. Blocking IPC calls check this
+ * and refuse with MRT_ERR_ISR (an ISR must never sleep — it has no task
+ * context to resume); their _isr twins exist for exactly that context.
+ * Hardware ports track real interrupt nesting; the host port exposes test
+ * hooks (mrt_test_isr_enter/exit) that flip the same flag.
+ */
+bool mrt_port_in_isr(void);
 
 /*
  * Kernel panic: the port stops everything and reports `file:line`. Used for
