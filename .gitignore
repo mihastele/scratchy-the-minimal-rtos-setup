@@ -1,0 +1,23 @@
+# Build trees (out-of-source builds live here by convention).
+build*/
+cmake-build-*/
+
+# Compiled objects and firmware images.
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+
+# CMake leftovers if someone configures in-source by accident.
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Editor and OS noise.
+*~
+*.swp
+.DS_Store
